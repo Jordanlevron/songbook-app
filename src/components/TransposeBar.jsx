@@ -22,21 +22,10 @@ const s = {
   }),
 }
 
-// Map a root note + semitone shift to the new root note label
-const CH = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
-const EH = { Db:'C#', Eb:'D#', Fb:'E', Gb:'F#', Ab:'G#', Bb:'A#', Cb:'B' }
-const FL = { 'D#':'Eb', 'A#':'Bb', 'G#':'Ab' }
-function shiftKey(root, semi) {
-  if (!root) return '—'
-  const base = EH[root] || root
-  const i = CH.indexOf(base)
-  if (i < 0) return root
-  const r = CH[(i + semi + 12) % 12]
-  return FL[r] || r
-}
+import { shiftKeyDisplay } from '../lib/transpose'
 
-export default function TransposeBar({ baseKey, semi, onSemi, readMode, onReadMode }) {
-  const currentKey = shiftKey(baseKey, semi)
+export default function TransposeBar({ baseKey, semi, onSemi, readMode, onReadMode, zoom = 1, onZoom }) {
+  const currentKey = shiftKeyDisplay(baseKey, semi)
 
   return (
     <div style={s.bar}>
@@ -55,8 +44,13 @@ export default function TransposeBar({ baseKey, semi, onSemi, readMode, onReadMo
 
       <div style={{ flex: 1 }} />
 
+      <button style={s.btn} onClick={() => onZoom(zoom - 0.1)} title="הקטן">−🔍</button>
+      <span style={{ ...s.label, minWidth: 36, textAlign: 'center' }}>{Math.round(zoom * 100)}%</span>
+      <button style={s.btn} onClick={() => onZoom(zoom + 0.1)} title="הגדל">+🔍</button>
+      <button style={{ ...s.btn, fontSize: 13 }} onClick={() => onZoom(1)} title="אפס זום">↺</button>
+
       <button style={s.toggle(!readMode)} onClick={() => onReadMode(!readMode)}>
-        {readMode ? '🎨 הצג צבעים' : '📖 מצב קריאה'}
+        {readMode ? '🎨 צבעים' : '📖 קריאה'}
       </button>
     </div>
   )

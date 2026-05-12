@@ -12,6 +12,9 @@ export default function SongPage() {
   const [loading, setLoading] = useState(true)
   const [semi, setSemi] = useState(0)
   const [readMode, setReadMode] = useState(true)
+  const [zoom, setZoom] = useState(1)
+
+  const handleZoom = (v) => setZoom(Math.max(0.3, Math.min(3, Math.round(v * 10) / 10)))
 
   useEffect(() => {
     setLoading(true)
@@ -47,8 +50,9 @@ export default function SongPage() {
         >
           ← ספרייה
         </button>
-        <h1 style={{ color: 'var(--accent)', fontSize: 20, margin: 0 }}>{song.title}</h1>
-        {song.artist && <p style={{ color: 'var(--subtext)', fontSize: 13, margin: '2px 0 0' }}>{song.artist}</p>}
+        <h1 style={{ color: 'var(--accent)', fontSize: 20, margin: 0, borderBottom: '1px solid var(--border)', paddingBottom: 6 }}>
+          {song.title}{song.artist ? ` — ${song.artist}` : ''}
+        </h1>
       </div>
 
       <TransposeBar
@@ -57,10 +61,12 @@ export default function SongPage() {
         onSemi={setSemi}
         readMode={readMode}
         onReadMode={setReadMode}
+        zoom={zoom}
+        onZoom={handleZoom}
       />
 
       <div style={{ flex: 1, overflow: 'auto', padding: '16px 8px' }}>
-        <SongViewer song={song} semi={semi} readMode={readMode} />
+        <SongViewer song={song} semi={semi} readMode={readMode} zoom={zoom} baseKey={baseKey} />
       </div>
     </div>
   )

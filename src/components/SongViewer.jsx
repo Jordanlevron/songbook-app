@@ -1,44 +1,177 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { transposeChord } from '../lib/transpose'
 
+const BARLINE_RE = /^(I{1,3}:?|:I{1,3}|:\||\|:?:?|\||x\d+|,)$/i
+
+function isBarlineText(t) {
+  return BARLINE_RE.test(t.trim())
+}
+
+function normalizeBarline(t) {
+  const s = t.trim()
+  if (/^(II+|:\|:|\|\|)$/i.test(s)) return '||'
+  if (/^(:I+|:\|)$/.test(s))        return '|:'
+  if (/^(I+:|:\|)$/.test(s))        return ':|'
+  return '|'
+}
+
+// A line is a chord-box if ALL items are chords and at least one is a barline
+function isChordBoxLine(items) {
+  return items.length > 0
+    && items.every(i => i.type === 'chord')
+    && items.some(i => isBarlineText(i.text))
+}
+
 const PT_TO_PX = 96 / 72
 
 const TYPE_STYLE = {
-  chord:     { bg: 'rgba(191,219,254,0.85)', border: '#2563eb', color: '#1e3a8a' },
+  chord:     { bg: 'rgba(80,80,80,0.15)', border: '#555', color: '#333' },
   lyric:     { bg: 'rgba(187,247,208,0.85)', border: '#16a34a', color: '#14532d' },
   structure: { bg: 'rgba(254,215,170,0.9)',  border: '#ea580c', color: '#7c2d12' },
 }
 
 const READ_STYLE = {
-  chord:     { bg: 'transparent', border: 'transparent', color: '#1a56db' },
+  chord:     { bg: 'transparent', border: 'transparent', color: '#555' },
   lyric:     { bg: 'transparent', border: 'transparent', color: '#111' },
   structure: { bg: 'transparent', border: 'transparent', color: '#9a3412' },
 }
 
-function Item({ item, scale, contentW, semi, readMode }) {
-  const ts = readMode ? READ_STYLE[item.type] : TYPE_STYLE[item.type]
-  const text = item.type === 'chord' ? transposeChord(item.text, semi) : item.text
+// Group items by Y position into lines (tolerance = yTol pt)
+function groupLines(items, yTol = 8) {
+  const sorted = [...items].sort((a, b) => a.y - b.y)
+  const lines = []
+  for (const item of sorted) {
+    const last = lines[lines.length - 1]
+    if (last && Math.abs(item.y - last.y) <= yTol) {
+      last.items.push(item)
+    } else {
+      lines.push({ y: item.y, items: [item] })
+    }
+  }
+  return lines
+}
+
+// Within a line, merge adjacent same-type items into runs.
+// Chords are never merged.
+function groupRuns(lineItems, lineY, xTol = 22) {
+  const sorted = [...lineItems].sort((a, b) => a.x0 - b.x0)
+  const runs = []
+  for (const item of sorted) {
+    const last = runs[runs.length - 1]
+    const gap = last ? item.x0 - last.x1 : Infinity
+    const canMerge = last
+      && last.type === item.type
+      && item.type !== 'chord'
+      && gap >= 0
+      && gap < xTol
+    if (canMerge) {
+      last.items.push(item)
+      last.x1 = Math.max(last.x1, item.x1)
+    } else {
+      runs.push({
+        type: item.type,
+        items: [item],
+        x0: item.x0,
+        x1: item.x1,
+        y: lineY ?? item.y,
+        font_pt: item.font_pt,
+        is_heb: item.is_heb,
+      })
+    }
+  }
+  return runs
+}
+
+// Build display text for a run in correct visual reading order
+function runText(run, semi, baseKey) {
+  const ordered = run.is_heb
+    ? [...run.items].sort((a, b) => b.x0 - a.x0)
+    : [...run.items].sort((a, b) => a.x0 - b.x0)
+  return ordered
+    .map(i => (i.type === 'chord' ? transposeChord(i.text, semi, baseKey) : i.text))
+    .join(' ')
+}
+
+// Renders a group of consecutive chord-box lines as one shared container.
+// All rows share the same left anchor and auto-size together.
+function ChordBoxSection({ lines, scale, semi, baseKey, readMode }) {
+  const allItems = lines.flatMap(l => l.items)
+  const fontPt   = Math.max(...allItems.map(i => i.font_pt))
+  const minX     = Math.min(...allItems.map(i => i.x0))
+  const top      = lines[0].y * PT_TO_PX * scale
+  const left     = minX       * PT_TO_PX * scale
+  const fontSize = fontPt * PT_TO_PX * scale
+  const lineH    = fontSize * 1.25
+
+  const chordColor   = readMode ? '#555' : '#333'
+  const barlineColor = readMode ? '#999' : '#777'
+
+  return (
+    <div style={{
+      position:      'absolute',
+      top,
+      left,
+      display:       'flex',
+      flexDirection: 'column',
+      alignItems:    'flex-start',
+      direction:     'ltr',
+      fontSize,
+      fontWeight:    'bold',
+      fontFamily:    'Arial, sans-serif',
+      whiteSpace:    'nowrap',
+    }}>
+      {lines.map((line, li) => {
+        const sorted = [...line.items].sort((a, b) => a.x0 - b.x0)
+        return (
+          <div key={li} style={{ display: 'flex', alignItems: 'center', direction: 'ltr', height: lineH, lineHeight: lineH + 'px' }}>
+            {sorted.map((item, i) => {
+              if (isBarlineText(item.text)) {
+                return (
+                  <span key={i} style={{ color: barlineColor, padding: '0 2px', fontWeight: 400 }}>
+                    {normalizeBarline(item.text)}
+                  </span>
+                )
+              }
+              const chord = transposeChord(item.text, semi, baseKey)
+              return (
+                <span key={i} style={{ color: chordColor, padding: '0 3px' }}>
+                  {chord}
+                </span>
+              )
+            })}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function Run({ run, scale, contentW, semi, baseKey, readMode, underline }) {
+  const ts = readMode ? READ_STYLE[run.type] : TYPE_STYLE[run.type]
+  const text = runText(run, semi, baseKey)
 
   const base = {
     position: 'absolute',
-    top:        item.y         * PT_TO_PX * scale,
-    height:     item.font_pt  * PT_TO_PX * scale * 1.25,
-    lineHeight: (item.font_pt * PT_TO_PX * scale * 1.25) + 'px',
-    fontSize:   item.font_pt  * PT_TO_PX * scale,
+    top:        run.y        * PT_TO_PX * scale,
+    height:     run.font_pt * PT_TO_PX * scale * 1.25,
+    lineHeight: (run.font_pt * PT_TO_PX * scale * 1.25) + 'px',
+    fontSize:   run.font_pt * PT_TO_PX * scale,
     fontWeight: 'bold',
     whiteSpace: 'nowrap',
     background:   ts.bg,
     borderBottom: readMode ? 'none' : `2px solid ${ts.border}`,
     color:  ts.color,
     fontFamily: 'Arial, sans-serif',
+    textDecoration: underline ? 'underline' : 'none',
+    textUnderlineOffset: '3px',
   }
 
-  if (item.is_heb) {
+  if (run.is_heb) {
     return (
       <div style={{
         ...base,
-        right:  (contentW - item.x1) * PT_TO_PX * scale,
-        width:  (item.x1 - item.x0)  * PT_TO_PX * scale,
+        right:  (contentW - run.x1) * PT_TO_PX * scale,
+        width:  (run.x1 - run.x0)   * PT_TO_PX * scale,
         padding: '0 2px',
         direction: 'rtl',
       }}>
@@ -49,7 +182,8 @@ function Item({ item, scale, contentW, semi, readMode }) {
   return (
     <div style={{
       ...base,
-      left:    item.x0 * PT_TO_PX * scale,
+      left:  run.x0 * PT_TO_PX * scale,
+      width: (run.x1 - run.x0) * PT_TO_PX * scale,
       padding: '0 3px',
       direction: 'ltr',
     }}>
@@ -58,19 +192,62 @@ function Item({ item, scale, contentW, semi, readMode }) {
   )
 }
 
-export default function SongViewer({ song, semi = 0, readMode = true }) {
-  const containerRef = useRef(null)
-  const [scale, setScale] = useState(1)
+// Render the title line as one text block with a "—" between title and artist.
+// Uses song.title words to separate title items from artist items.
+function TitleLine({ items, scale, contentW, songTitle }) {
+  const sorted = [...items].sort((a, b) => a.x0 - b.x0)
+  const fontPt = Math.max(...sorted.map(i => i.font_pt))
+  const topY   = sorted[0].y
+  const maxX1  = Math.max(...sorted.map(i => i.x1))
 
-  // Per spec: CONTENT_W = max(page_w, max(all x1 values) + 8)
+  // RTL text order: larger x0 = visually to the right = earlier in reading order
+  const rtlText = (arr) => [...arr].sort((a, b) => b.x0 - a.x0).map(i => i.text).join(' ')
+
+  // Identify which items belong to the title vs artist using song.title words
+  const titleWords = new Set((songTitle || '').trim().split(/\s+/).filter(Boolean))
+  const titleItems  = sorted.filter(i => titleWords.has(i.text.trim()))
+  const artistItems = sorted.filter(i => !titleWords.has(i.text.trim()))
+
+  let text
+  if (artistItems.length > 0 && titleItems.length > 0) {
+    text = rtlText(titleItems) + ' — ' + rtlText(artistItems)
+  } else {
+    text = rtlText(sorted)
+  }
+
+  return (
+    <div style={{
+      position: 'absolute',
+      top:        topY * PT_TO_PX * scale,
+      right:      (contentW - maxX1) * PT_TO_PX * scale,
+      fontSize:   fontPt * PT_TO_PX * scale,
+      lineHeight: (fontPt * PT_TO_PX * scale * 1.25) + 'px',
+      fontWeight: 'bold',
+      whiteSpace: 'nowrap',
+      color: '#111',
+      fontFamily: 'Arial, sans-serif',
+      direction: 'rtl',
+      textDecoration: 'underline',
+      textUnderlineOffset: '3px',
+    }}>
+      {text}
+    </div>
+  )
+}
+
+export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, baseKey = null }) {
+  const containerRef = useRef(null)
+  const [baseScale, setBaseScale] = useState(1)
+
   const pageW = song.page_size?.w ?? 540
   const allX1 = song.pages.flatMap(p => p.items.map(it => it.x1 ?? it.x0))
   const contentW = Math.max(pageW, allX1.length ? Math.max(...allX1) + 8 : pageW)
+  const scale = baseScale * zoom
 
   const recalcScale = useCallback(() => {
     if (!containerRef.current) return
     const displayW = containerRef.current.clientWidth || 660
-    setScale(displayW / (contentW * PT_TO_PX))
+    setBaseScale(displayW / (contentW * PT_TO_PX))
   }, [contentW])
 
   useEffect(() => {
@@ -80,10 +257,69 @@ export default function SongViewer({ song, semi = 0, readMode = true }) {
     return () => ro.disconnect()
   }, [recalcScale])
 
+
   return (
-    <div ref={containerRef} style={{ width: '100%', padding: '0 8px' }}>
+    <div ref={containerRef} style={{ width: '100%', padding: '0 8px', overflowX: 'auto' }}>
       {song.pages.map((page, pi) => {
         const pageH = (page.height_pt ?? 780) * PT_TO_PX * scale + 20
+        const lines = groupLines(page.items)
+
+        const elements = []
+        let li = 0
+        while (li < lines.length) {
+          const line = lines[li]
+          const isTitleByData = line.items.some(i => i.is_underline)
+          const effectiveTitleLine = pi === 0 && (isTitleByData || li === 0)
+
+          if (effectiveTitleLine) {
+            elements.push(
+              <TitleLine
+                key={`${pi}-title`}
+                items={line.items}
+                scale={scale}
+                contentW={contentW}
+                songTitle={song.title}
+              />
+            )
+            li++
+          } else if (isChordBoxLine(line.items)) {
+            // Collect all consecutive chord-box lines into one section
+            const group = [line]
+            let gi = li + 1
+            while (gi < lines.length && isChordBoxLine(lines[gi].items)) {
+              group.push(lines[gi])
+              gi++
+            }
+            elements.push(
+              <ChordBoxSection
+                key={`${pi}-${li}-section`}
+                lines={group}
+                scale={scale}
+                semi={semi}
+                baseKey={baseKey}
+                readMode={readMode}
+              />
+            )
+            li = gi
+          } else {
+            groupRuns(line.items, line.y).forEach((run, ri) => {
+              elements.push(
+                <Run
+                  key={`${pi}-${li}-${ri}`}
+                  run={run}
+                  scale={scale}
+                  contentW={contentW}
+                  semi={semi}
+                  baseKey={baseKey}
+                  readMode={readMode}
+                  underline={false}
+                />
+              )
+            })
+            li++
+          }
+        }
+
         return (
           <div key={pi} style={{ marginBottom: 40 }}>
             {song.pages.length > 1 && (
@@ -99,11 +335,9 @@ export default function SongViewer({ song, semi = 0, readMode = true }) {
               borderRadius: 4,
               marginBottom: 8,
               boxShadow: '0 4px 20px rgba(0,0,0,.4)',
-              overflow: 'hidden',
+              overflow: 'visible',
             }}>
-              {page.items.map((item, ii) => (
-                <Item key={ii} item={item} scale={scale} contentW={contentW} semi={semi} readMode={readMode} />
-              ))}
+              {elements}
             </div>
           </div>
         )
