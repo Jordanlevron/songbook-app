@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { transposeChord } from '../lib/transpose'
 
-const BARLINE_RE = /^(I{1,3}:?|:I{1,3}|:\||\|:?:?|\||x\d+|,)$/i
+const BARLINE_RE = /^(I{1,3}:?|:I{1,3}|:\||\|:?:?|\||x\d+)$/i
 
 function isBarlineText(t) {
   return BARLINE_RE.test(t.trim())
@@ -37,7 +37,7 @@ const READ_STYLE = {
 }
 
 // Group items by Y position into lines (tolerance = yTol pt)
-function groupLines(items, yTol = 8) {
+function groupLines(items, yTol = 5) {
   const sorted = [...items].sort((a, b) => a.y - b.y)
   const lines = []
   for (const item of sorted) {
@@ -102,44 +102,103 @@ function ChordBoxSection({ lines, scale, semi, baseKey, readMode }) {
   const left     = minX       * PT_TO_PX * scale
   const fontSize = fontPt * PT_TO_PX * scale
   const lineH    = fontSize * 1.25
+  const lastY    = lines[lines.length - 1].y
+  const height   = (lastY - lines[0].y) * PT_TO_PX * scale + lineH
 
   const chordColor   = readMode ? '#555' : '#333'
   const barlineColor = readMode ? '#999' : '#777'
 
   return (
     <div style={{
-      position:      'absolute',
+      position:   'absolute',
       top,
       left,
-      display:       'flex',
-      flexDirection: 'column',
-      alignItems:    'flex-start',
-      direction:     'ltr',
+      height,
+      direction:  'ltr',
       fontSize,
-      fontWeight:    'bold',
-      fontFamily:    'Arial, sans-serif',
-      whiteSpace:    'nowrap',
+      fontWeight: 'bold',
+      fontFamily: 'Arial, sans-serif',
+      whiteSpace: 'nowrap',
     }}>
       {lines.map((line, li) => {
+        const rowTop = (line.y - lines[0].y) * PT_TO_PX * scale
         const sorted = [...line.items].sort((a, b) => a.x0 - b.x0)
         return (
-          <div key={li} style={{ display: 'flex', alignItems: 'center', direction: 'ltr', height: lineH, lineHeight: lineH + 'px' }}>
+          <div key={li} style={{
+            position: 'absolute', top: rowTop,
+            display: 'flex', alignItems: 'center', direction: 'ltr',
+            height: lineH, lineHeight: lineH + 'px',
+          }}>
             {sorted.map((item, i) => {
               if (isBarlineText(item.text)) {
                 return (
-                  <span key={i} style={{ color: barlineColor, padding: '0 2px', fontWeight: 400 }}>
+                  <span key={i} style={{ color: barlineColor, padding: '0 1px', fontWeight: 400 }}>
                     {normalizeBarline(item.text)}
                   </span>
                 )
               }
+              if (!/^[A-G]/.test(item.text)) return null
               const chord = transposeChord(item.text, semi, baseKey)
               return (
-                <span key={i} style={{ color: chordColor, padding: '0 3px' }}>
+                <span key={i} style={{ color: chordColor, padding: '0 2px' }}>
                   {chord}
                 </span>
               )
             })}
           </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// One container per chord line — one selectable unit, original x-positions preserved.
+// Flex layout with min-width = gap to next chord: preserves positions when text fits,
+// shifts subsequent chords right when transposed text is wider (they respond to each other).
+// Stray tokens (bare '#', ',') are filtered. direction:ltr set explicitly.
+function ChordLine({ chordItems, lineY, scale, semi, baseKey, readMode }) {
+  const ts   = readMode ? READ_STYLE.chord : TYPE_STYLE.chord
+  const real = [...chordItems]
+    .filter(i => /^[A-G]/.test(i.text))
+    .sort((a, b) => a.x0 - b.x0)
+  if (!real.length) return null
+
+  const fontPt  = Math.max(...real.map(i => i.font_pt))
+  const fontSize = fontPt * PT_TO_PX * scale
+  const lineH    = fontSize * 1.25
+  const originX  = real[0].x0
+
+  return (
+    <div style={{
+      position:   'absolute',
+      top:        lineY * PT_TO_PX * scale,
+      left:       originX * PT_TO_PX * scale,
+      height:     lineH,
+      lineHeight: lineH + 'px',
+      direction:  'ltr',
+      whiteSpace: 'nowrap',
+      display:    'flex',
+      alignItems: 'center',
+    }}>
+      {real.map((item, idx) => {
+        const nextX    = real[idx + 1]?.x0
+        const minWidth = nextX != null ? (nextX - item.x0) * PT_TO_PX * scale : undefined
+        return (
+          <span key={idx} style={{
+            minWidth,
+            display:      'inline-block',
+            fontSize,
+            fontWeight:   'bold',
+            fontFamily:   'Arial, sans-serif',
+            whiteSpace:   'nowrap',
+            direction:    'ltr',
+            color:        ts.color,
+            background:   ts.bg,
+            borderBottom: readMode ? 'none' : `2px solid ${ts.border}`,
+            padding:      '0 3px',
+          }}>
+            {transposeChord(item.text, semi, baseKey)}
+          </span>
         )
       })}
     </div>
@@ -302,7 +361,23 @@ export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, 
             )
             li = gi
           } else {
-            groupRuns(line.items, line.y).forEach((run, ri) => {
+            const chordItems = line.items.filter(i => i.type === 'chord')
+            const otherItems = line.items.filter(i => i.type !== 'chord')
+
+            if (chordItems.length > 0) {
+              elements.push(
+                <ChordLine
+                  key={`${pi}-${li}-chords`}
+                  chordItems={chordItems}
+                  lineY={line.y}
+                  scale={scale}
+                  semi={semi}
+                  baseKey={baseKey}
+                  readMode={readMode}
+                />
+              )
+            }
+            groupRuns(otherItems, line.y).forEach((run, ri) => {
               elements.push(
                 <Run
                   key={`${pi}-${li}-${ri}`}

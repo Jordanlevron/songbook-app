@@ -38,7 +38,7 @@ export default function SongPage() {
   }
 
   const chords = song.pages.flatMap(p => p.items.filter(i => i.type === 'chord').map(i => i.text))
-  const baseKey = song.key?.manual ?? song.key?.detected ?? detectKey(chords)
+  const baseKey = song.key?.manual ?? detectKey(chords)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
