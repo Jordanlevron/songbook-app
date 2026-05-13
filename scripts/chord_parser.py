@@ -494,6 +494,178 @@ h1{{color:#cba6f7;margin:0 0 4px;font-size:18px}}
 # נקודת כניסה
 # ══════════════════════════════════════════
 
+def _color_to_hex(color):
+    """Convert pdfplumber color (None / float / RGB / CMYK tuple) to #rrggbb."""
+    if color is None:
+        return '#000000'
+    try:
+        if isinstance(color, (int, float)):
+            v = int(min(1.0, float(color)) * 255)
+            return f'#{v:02x}{v:02x}{v:02x}'
+        c = [min(1.0, float(x)) for x in color]
+        if len(c) == 1:
+            v = int(c[0] * 255); return f'#{v:02x}{v:02x}{v:02x}'
+        if len(c) == 3:
+            return '#{:02x}{:02x}{:02x}'.format(*(int(x * 255) for x in c))
+        if len(c) == 4:           # CMYK
+            cm, m, y, k = c
+            return '#{:02x}{:02x}{:02x}'.format(
+                int((1 - cm) * (1 - k) * 255),
+                int((1 - m)  * (1 - k) * 255),
+                int((1 - y)  * (1 - k) * 255),
+            )
+    except Exception:
+        pass
+    return '#000000'
+
+
+def _pts_to_page(pts, page_h):
+    """
+    Convert a list of (x, y) points to page-space (y=0 at top).
+    pdfplumber stores pts in PDF space (y=0 at bottom) for raw line/curve objects.
+    We detect which convention is in use by comparing y values to page height.
+    """
+    ys = [p[1] for p in pts]
+    # If all y values are <= page_h they're likely already in page space
+    # (pdfplumber may or may not pre-transform depending on version).
+    # Safe heuristic: if mean y < page_h/2 AND page_h is plausible for page-space
+    # top-origin, trust as-is; otherwise flip.
+    mean_y = sum(ys) / len(ys) if ys else 0
+    # In PDF space a mid-page value ≈ page_h/2; in page-space also ≈ page_h/2.
+    # We rely on pdfplumber having already done the flip (most versions do).
+    return [(round(p[0], 1), round(p[1], 1)) for p in pts]
+
+
+def extract_graphic_shapes(page):
+    """
+    Extract line-based shapes (arrows, brackets, decorative marks) that are NOT
+    simple rectangles.  Returns a list of shape dicts for SVG rendering.
+    """
+    page_w = page.width
+    page_h = page.height
+
+    raw_segs = []
+
+    # ── pdfplumber line segments ──────────────────────────────────────────────
+    for obj in page.lines:
+        pts = obj.get('pts')
+        if pts and len(pts) >= 2:
+            ep = _pts_to_page(pts, page_h)
+            x0, y0 = ep[0]
+            x1, y1 = ep[-1]
+        else:
+            x0 = round(obj.get('x0', 0), 1)
+            x1 = round(obj.get('x1', 0), 1)
+            y0 = round(obj.get('top', 0), 1)
+            y1 = round(obj.get('bottom', y0), 1)
+
+        seg_w = abs(x1 - x0)
+        seg_h = abs(y1 - y0)
+        # Skip page-spanning lines (borders / rules)
+        if seg_w > page_w * 0.7 or seg_h > page_h * 0.7:
+            continue
+
+        raw_segs.append({
+            'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1,
+            'color': _color_to_hex(obj.get('stroking_color')),
+            'lw': round(obj.get('linewidth', 1) or 1, 1),
+            'kind': 'line',
+        })
+
+    # ── pdfplumber curves (Bezier paths) ─────────────────────────────────────
+    for obj in page.curves:
+        pts = obj.get('pts')
+        if not pts or len(pts) < 2:
+            continue
+        ep = _pts_to_page(pts, page_h)
+        # Store first and last control point as the effective span
+        x0, y0 = ep[0]
+        x1, y1 = ep[-1]
+        all_x = [p[0] for p in ep]; all_y = [p[1] for p in ep]
+        bx0 = min(all_x); bx1 = max(all_x)
+        by0 = min(all_y); by1 = max(all_y)
+
+        if (bx1 - bx0) > page_w * 0.7 or (by1 - by0) > page_h * 0.7:
+            continue
+
+        raw_segs.append({
+            'x0': x0, 'y0': y0, 'x1': x1, 'y1': y1,
+            'bx0': bx0, 'by0': by0, 'bx1': bx1, 'by1': by1,
+            'color': _color_to_hex(obj.get('stroking_color')),
+            'lw': round(obj.get('linewidth', 1) or 1, 1),
+            'kind': 'curve',
+            'ctrl': [(round(p[0], 1), round(p[1], 1)) for p in ep],
+        })
+
+    if not raw_segs:
+        return []
+
+    # ── Group nearby segments into shape clusters ─────────────────────────────
+    def bbox(s):
+        xs = [s['x0'], s['x1']] + ([s['bx0'], s['bx1']] if 'bx0' in s else [])
+        ys = [s['y0'], s['y1']] + ([s['by0'], s['by1']] if 'by0' in s else [])
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def boxes_close(b1, b2, tol=30):
+        dx = max(0, max(b1[0], b2[0]) - min(b1[2], b2[2]))
+        dy = max(0, max(b1[1], b2[1]) - min(b1[3], b2[3]))
+        return dx < tol and dy < tol
+
+    bboxes = [bbox(s) for s in raw_segs]
+    used = [False] * len(raw_segs)
+    groups = []
+
+    for i in range(len(raw_segs)):
+        if used[i]: continue
+        grp = [i]; used[i] = True
+        changed = True
+        while changed:
+            changed = False
+            for j in range(len(raw_segs)):
+                if used[j]: continue
+                if any(boxes_close(bboxes[g], bboxes[j]) for g in grp):
+                    grp.append(j); used[j] = True; changed = True
+        groups.append(grp)
+
+    # ── Build shape objects ───────────────────────────────────────────────────
+    shapes = []
+    for grp in groups:
+        segs = [raw_segs[i] for i in grp]
+        all_x = [v for s in segs for v in [s['x0'], s['x1']] + ([s['bx0'], s['bx1']] if 'bx0' in s else [])]
+        all_y = [v for s in segs for v in [s['y0'], s['y1']] + ([s['by0'], s['by1']] if 'by0' in s else [])]
+        x0 = min(all_x); x1 = max(all_x)
+        y0 = min(all_y); y1 = max(all_y)
+        w = x1 - x0; h = y1 - y0
+
+        # Skip if tiny dot or too large
+        if w < 3 and h < 3: continue
+        if w > page_w * 0.6 or h > page_h * 0.6: continue
+
+        color = segs[0]['color']
+        lw    = segs[0]['lw']
+
+        out_segs = []
+        for s in segs:
+            entry = {
+                'x0': round(s['x0'] - x0, 1), 'y0': round(s['y0'] - y0, 1),
+                'x1': round(s['x1'] - x0, 1), 'y1': round(s['y1'] - y0, 1),
+                'k': s['kind'][0],  # 'l' or 'c'
+            }
+            if s['kind'] == 'curve':
+                # flat list [x0,y0,x1,y1,...] — Firestore forbids nested arrays
+                entry['pts'] = [v for p in s['ctrl'] for v in (round(p[0]-x0,1), round(p[1]-y0,1))]
+            out_segs.append(entry)
+
+        shapes.append({
+            'x0': round(x0, 1), 'y': round(y0, 1),
+            'x1': round(x1, 1), 'y2': round(y1, 1),
+            'color': color, 'lw': lw,
+            'segs': out_segs,
+        })
+
+    return shapes
+
+
 def parse_pdf(pdf_path, output_path=None):
     pdf_path = Path(pdf_path)
     if output_path is None:
@@ -512,7 +684,8 @@ def parse_pdf(pdf_path, output_path=None):
                 for r in page.rects
                 if (r['x1'] - r['x0']) > 15 and (r['bottom'] - r['top']) > 8
             ]
-            pages_data.append({'page_num': i+1, 'items': items, 'height_pt': page.height, 'rects': rects})
+            shapes = extract_graphic_shapes(page)
+            pages_data.append({'page_num': i+1, 'items': items, 'height_pt': page.height, 'rects': rects, 'shapes': shapes})
             types = {}
             for it in items: types[it['type']] = types.get(it['type'],0)+1
             print(f"  עמוד {i+1}: {sum(types.values())} items — {types}")

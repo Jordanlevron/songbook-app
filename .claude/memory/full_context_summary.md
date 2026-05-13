@@ -61,6 +61,9 @@ Normalised on render: II→||, :II→|:, II:→:|. Repeat markers (x2) shown in 
 `page.rects` from pdfplumber → stored in JSON as `rects: [{x0,y,x1,y2}]`.
 SongViewer renders them as bordered divs (pointer-events:none) — the bracket/box decorations from the original Word document.
 
+### Graphic shapes (arrows, brackets, decorative marks)
+`extract_graphic_shapes(page)` in chord_parser.py pulls `page.lines` + `page.curves`, filters out page-spanning lines (>70% width/height), clusters nearby segments (30pt proximity) and stores them as `shapes: [{x0,y,x1,y2,color,lw,segs}]` per page. `segs` entries have `{k:'l'|'c', x0,y0,x1,y1}` for lines and add `pts` for curves. Color converted via `_color_to_hex` (grayscale/RGB/CMYK). SongViewer renders as inline SVG `<line>`/`<path>` at exact position.
+
 ### Classifier rules (chord_parser.py)
 ```
 classify_word(text, heb, line_has_chord, line_has_eng_lyrics):
@@ -102,6 +105,7 @@ npm run build
 ```
 
 ## Open Issues (as of last session)
-- Hebrew hyphenated words fix and rect rendering are implemented but songs need to be **re-parsed from the source PDF** to reflect parser changes — the existing songs_json/ files were built with the old parser
-- `Bm` chord appearing in wrong position in הולכת איתך — suspected old JSON, needs re-parse to confirm
-- Chords going slightly off-screen in לבד במדבר — needs re-parse to confirm
+- All parser improvements (hebrew hyphens, rects, shapes/arrows, column boundary) are implemented but songs need to be **re-parsed from the source PDF** — existing songs_json/ were built with old parser
+- After re-parse: wipe Firestore and bulk-upload all ~800 songs
+- `Bm` chord positioning in הולכת איתך — needs re-parse to confirm
+- Chord positioning in לבד במדבר — needs re-parse to confirm

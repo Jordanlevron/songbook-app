@@ -102,6 +102,38 @@ def is_continuation(title):
     return t.startswith('המשך') or bool(re.search(r'#[2-9]\d*\s*$', t))
 
 
+# Maqaf / hyphen / dash connecting last title word to first artist word: "קיץ-תומר"
+_MAQAF_MID_RE = re.compile(
+    r'^([א-ת\w]{2,})'   # title word (≥2 chars, Hebrew or word-chars)
+    r'[-‐‑–—־]'  # hyphen / en-dash / em-dash / maqaf
+    r'([א-ת\w]{2,})$'   # artist word
+)
+
+def _try_maqaf_split(first_line):
+    """
+    Fallback title/artist split: find an item like 'קיץ-תומר' (title-last + dash + artist-first)
+    and split the line around it.  Returns (title, artist) or (None, None).
+    """
+    by_x = sorted(first_line, key=lambda i: i['x0'])
+    for idx, item in enumerate(by_x):
+        m = _MAQAF_MID_RE.match(item['text'])
+        if not m:
+            continue
+        # Items with higher x0 than boundary = title words
+        # Items with lower x0 than boundary  = artist words
+        # m.group(1) = title's last word, m.group(2) = artist's first word
+        higher = by_x[idx + 1:]  # title side
+        lower  = by_x[:idx]      # artist side
+        # Synthetic items to include the split halves at correct relative x
+        title_items  = higher + [{'text': m.group(1), 'x0': item['x0'] + 0.1, 'is_heb': True}]
+        artist_items = lower  + [{'text': m.group(2), 'x0': item['x0'] - 0.1, 'is_heb': True}]
+        title  = strip_part_marker(_ordered_text(title_items))
+        artist = _ordered_text(artist_items) if artist_items else m.group(2)
+        if title and any(_is_real_word({'text': w}) for w in title.split()):
+            return title, artist
+    return None, None
+
+
 def _title_words_overlap(a, b):
     """True if two title strings share >= 50% of their words (handles partial Piano Man / Billy Joel splits)."""
     wa = set(a.split())
@@ -190,7 +222,9 @@ def detect_title_artist(page_items, y_tol=4):
         if gap > max_gap:
             max_gap, split_idx = gap, i
 
-    if len(first_line) >= 2:
+    MIN_TITLE_ARTIST_GAP = 12  # pt — smaller gaps are within-title spacing, not a split
+
+    if len(first_line) >= 2 and max_gap >= MIN_TITLE_ARTIST_GAP:
         right = first_line[split_idx + 1:]   # larger x = title in RTL layout
         left  = first_line[:split_idx + 1]   # smaller x = artist in RTL layout
         right_has = any(_is_real_word(it) for it in right)
@@ -206,8 +240,14 @@ def detect_title_artist(page_items, y_tol=4):
             title  = strip_part_marker(_ordered_text(first_line))
             artist = ''
     else:
-        title  = strip_part_marker(_ordered_text(first_line))
-        artist = ''
+        # No clear gap — try maqaf/dash boundary as fallback
+        maqaf_title, maqaf_artist = _try_maqaf_split(first_line)
+        if maqaf_title:
+            title  = maqaf_title
+            artist = maqaf_artist or ''
+        else:
+            title  = strip_part_marker(_ordered_text(first_line))
+            artist = ''
 
     return title or None, artist or None
 
@@ -254,6 +294,7 @@ def build_song(page_group):
             'height_pt': round(pg['height_pt'], 1),
             'items':     items,
             'rects':     pg.get('rects', []),
+            'shapes':    pg.get('shapes', []),
         })
         if items:
             page_w = max(page_w, max(i['x1'] for i in items))

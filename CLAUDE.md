@@ -91,6 +91,9 @@ These are classified as type='structure' (orange) and rendered as `Run` elements
 ### Enclosing rectangles
 `page.rects` from pdfplumber are extracted and stored in the JSON as `rects: [{x0, y, x1, y2}]`. SongViewer renders them as absolutely-positioned bordered divs (pointer-events: none) to reconstruct the bracket/box decorations from the original Word document.
 
+### Graphic shapes (arrows, brackets)
+`page.lines` and `page.curves` from pdfplumber are extracted by `extract_graphic_shapes()` in chord_parser.py. Line segments spanning > 70% of the page are filtered out (borders/rules). Nearby segments are clustered by proximity (30pt) into shape groups. Each group is stored in the JSON as `shapes: [{x0, y, x1, y2, color, lw, segs: [{k, x0,y0,x1,y1, pts?}]}]`. SongViewer renders each shape as an inline SVG with `<line>` or `<path>` elements at exact position. Color comes from `stroking_color` (supports grayscale, RGB, CMYK).
+
 ### Hebrew hyphenated words
 `merge_hebrew_hyphens()` in chord_parser.py detects adjacent Hebrew + hyphen + Hebrew token sequences at the same Y (gap < 10pt) and merges them into one item assembled in descending-x (RTL) order. Fixes syllable-split words like `נו-תר-נו` that otherwise lose the hyphen and render with gaps.
 

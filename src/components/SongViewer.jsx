@@ -57,17 +57,46 @@ function groupLines(items, yTol = 5) {
   return lines
 }
 
-// Within a Y-line, split items into independent X-clusters when a gap > minGapPt
-// exists between them. This separates left/right columns that share a Y coordinate.
-function splitXClusters(items, minGapPt = 45) {
+// Detect the two-column boundary for a page by finding the longest uncovered
+// x-range in the middle half of the page. Returns the midpoint of that gap,
+// or null if no clear column gap is found (single-column or narrow gap < 15pt).
+function findColumnBoundary(items, pageW) {
+  const W = Math.ceil(pageW) + 10
+  const covered = new Uint8Array(W)
+  for (const item of items) {
+    const lo = Math.max(0, Math.floor(item.x0))
+    const hi = Math.min(W - 1, Math.ceil(item.x1))
+    for (let x = lo; x <= hi; x++) covered[x] = 1
+  }
+  const midLo = Math.floor(W / 4)
+  const midHi = Math.ceil(3 * W / 4)
+  let bestStart = -1, bestLen = 0, runStart = -1, runLen = 0
+  for (let x = midLo; x <= midHi; x++) {
+    if (!covered[x]) {
+      if (runLen === 0) runStart = x
+      if (++runLen > bestLen) { bestLen = runLen; bestStart = runStart }
+    } else {
+      runLen = 0
+    }
+  }
+  return bestLen > 15 ? bestStart + bestLen / 2 : null
+}
+
+// Within a Y-line, split items into independent X-clusters.
+// Splits on gap > minGapPt OR when an item crosses the detected column boundary.
+function splitXClusters(items, minGapPt = 45, colBoundary = null) {
   const sorted = [...items].sort((a, b) => a.x0 - b.x0)
   const clusters = []
-  let cur = []
+  let cur = [], lastX1 = -Infinity
   for (const item of sorted) {
-    if (!cur.length) { cur.push(item); continue }
-    const lastX1 = Math.max(...cur.map(i => i.x1))
-    if (item.x0 - lastX1 > minGapPt) { clusters.push(cur); cur = [] }
+    if (!cur.length) { cur.push(item); lastX1 = item.x1; continue }
+    const gap = item.x0 - lastX1
+    const crossesBoundary = colBoundary != null
+      && cur[cur.length - 1].x0 < colBoundary
+      && item.x0 >= colBoundary
+    if (gap > minGapPt || crossesBoundary) { clusters.push(cur); cur = []; lastX1 = -Infinity }
     cur.push(item)
+    lastX1 = Math.max(lastX1, item.x1)
   }
   if (cur.length) clusters.push(cur)
   return clusters
@@ -394,12 +423,13 @@ export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, 
       {song.pages.map((page, pi) => {
         const pageH = (page.height_pt ?? 780) * PT_TO_PX * scale + 20
         const lines = groupLines(page.items)
+        const colBoundary = findColumnBoundary(page.items, contentW)
 
         // Flatten Y-lines into X-clusters: each cluster is an independent visual unit.
-        // This separates left/right column items that share a Y coordinate.
+        // Splits on large gap OR on the detected column boundary (whichever fires first).
         const clusters = []
         for (const line of lines) {
-          for (const clusterItems of splitXClusters(line.items)) {
+          for (const clusterItems of splitXClusters(line.items, 45, colBoundary)) {
             clusters.push({ y: line.y, items: clusterItems })
           }
         }
@@ -509,6 +539,49 @@ export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, 
                   boxSizing:    'border-box',
                 }} />
               ))}
+              {page.shapes?.map((shape, si) => {
+                const sc   = PT_TO_PX * scale
+                const pad  = Math.max(2, shape.lw * sc)
+                const svgW = (shape.x1 - shape.x0) * sc + pad * 2
+                const svgH = (shape.y2 - shape.y)  * sc + pad * 2
+                const sw   = Math.max(0.5, shape.lw * sc)
+                return (
+                  <svg key={`shape-${si}`} style={{
+                    position:      'absolute',
+                    left:          shape.x0 * sc - pad,
+                    top:           shape.y  * sc - pad,
+                    width:         svgW,
+                    height:        svgH,
+                    overflow:      'visible',
+                    pointerEvents: 'none',
+                  }}>
+                    {shape.segs.map((seg, sj) => {
+                      const ox = pad, oy = pad
+                      if (seg.k === 'c' && seg.pts?.length >= 4) {
+                        // flat pts [x0,y0,x1,y1,...] — pairs of coords
+                        const p = seg.pts
+                        const n = Math.floor(p.length / 2)
+                        let d = `M ${p[0]*sc+ox} ${p[1]*sc+oy}`
+                        if (n === 4) {
+                          d += ` C ${p[2]*sc+ox} ${p[3]*sc+oy} ${p[4]*sc+ox} ${p[5]*sc+oy} ${p[6]*sc+ox} ${p[7]*sc+oy}`
+                        } else if (n === 3) {
+                          d += ` Q ${p[2]*sc+ox} ${p[3]*sc+oy} ${p[4]*sc+ox} ${p[5]*sc+oy}`
+                        } else {
+                          d += ` L ${p[p.length-2]*sc+ox} ${p[p.length-1]*sc+oy}`
+                        }
+                        return <path key={sj} d={d} stroke={shape.color} strokeWidth={sw} fill="none" strokeLinecap="round" />
+                      }
+                      return (
+                        <line key={sj}
+                          x1={seg.x0 * sc + ox} y1={seg.y0 * sc + oy}
+                          x2={seg.x1 * sc + ox} y2={seg.y1 * sc + oy}
+                          stroke={shape.color} strokeWidth={sw} strokeLinecap="round"
+                        />
+                      )
+                    })}
+                  </svg>
+                )
+              })}
               {elements}
             </div>
           </div>
