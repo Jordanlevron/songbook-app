@@ -9,6 +9,7 @@ function isBarlineText(t) {
 
 function normalizeBarline(t) {
   const s = t.trim()
+  if (/^x\d+$/i.test(s))            return s     // x2, x3 — keep as-is
   if (/^(II+|:\|:|\|\|)$/i.test(s)) return '||'
   if (/^(:I+|:\|)$/.test(s))        return '|:'
   if (/^(I+:|:\|)$/.test(s))        return ':|'
@@ -30,10 +31,15 @@ const TYPE_STYLE = {
   structure: { bg: 'rgba(254,215,170,0.9)',  border: '#ea580c', color: '#7c2d12' },
 }
 
-const READ_STYLE = {
-  chord:     { bg: 'transparent', border: 'transparent', color: '#555' },
-  lyric:     { bg: 'transparent', border: 'transparent', color: '#111' },
-  structure: { bg: 'transparent', border: 'transparent', color: '#9a3412' },
+const DEFAULT_READ_COLORS = { chord: '#555555', lyric: '#111111', structure: '#9a3412' }
+
+function readStyle(colors) {
+  const c = { ...DEFAULT_READ_COLORS, ...colors }
+  return {
+    chord:     { bg: 'transparent', border: 'transparent', color: c.chord },
+    lyric:     { bg: 'transparent', border: 'transparent', color: c.lyric },
+    structure: { bg: 'transparent', border: 'transparent', color: c.structure },
+  }
 }
 
 // Group items by Y position into lines (tolerance = yTol pt)
@@ -49,6 +55,22 @@ function groupLines(items, yTol = 5) {
     }
   }
   return lines
+}
+
+// Within a Y-line, split items into independent X-clusters when a gap > minGapPt
+// exists between them. This separates left/right columns that share a Y coordinate.
+function splitXClusters(items, minGapPt = 45) {
+  const sorted = [...items].sort((a, b) => a.x0 - b.x0)
+  const clusters = []
+  let cur = []
+  for (const item of sorted) {
+    if (!cur.length) { cur.push(item); continue }
+    const lastX1 = Math.max(...cur.map(i => i.x1))
+    if (item.x0 - lastX1 > minGapPt) { clusters.push(cur); cur = [] }
+    cur.push(item)
+  }
+  if (cur.length) clusters.push(cur)
+  return clusters
 }
 
 // Within a line, merge adjacent same-type items into runs.
@@ -94,7 +116,7 @@ function runText(run, semi, baseKey) {
 
 // Renders a group of consecutive chord-box lines as one shared container.
 // All rows share the same left anchor and auto-size together.
-function ChordBoxSection({ lines, scale, semi, baseKey, readMode }) {
+function ChordBoxSection({ lines, scale, semi, baseKey, readMode, colors }) {
   const allItems = lines.flatMap(l => l.items)
   const fontPt   = Math.max(...allItems.map(i => i.font_pt))
   const minX     = Math.min(...allItems.map(i => i.x0))
@@ -105,8 +127,8 @@ function ChordBoxSection({ lines, scale, semi, baseKey, readMode }) {
   const lastY    = lines[lines.length - 1].y
   const height   = (lastY - lines[0].y) * PT_TO_PX * scale + lineH
 
-  const chordColor   = readMode ? '#555' : '#333'
-  const barlineColor = readMode ? '#999' : '#777'
+  const chordColor   = readMode ? (colors?.chord   ?? '#555555') : '#333'
+  const barlineColor = readMode ? '#aaa' : '#777'
 
   return (
     <div style={{
@@ -131,9 +153,16 @@ function ChordBoxSection({ lines, scale, semi, baseKey, readMode }) {
           }}>
             {sorted.map((item, i) => {
               if (isBarlineText(item.text)) {
+                const nb       = normalizeBarline(item.text)
+                const isRepeat = /^x\d+$/i.test(item.text)
                 return (
-                  <span key={i} style={{ color: barlineColor, padding: '0 1px', fontWeight: 400 }}>
-                    {normalizeBarline(item.text)}
+                  <span key={i} style={{
+                    color:      isRepeat ? '#9333ea' : barlineColor,
+                    padding:    isRepeat ? '0 3px'   : '0 1px',
+                    fontWeight: isRepeat ? 'bold'     : 400,
+                    fontSize:   isRepeat ? '0.82em'  : undefined,
+                  }}>
+                    {nb}
                   </span>
                 )
               }
@@ -152,18 +181,23 @@ function ChordBoxSection({ lines, scale, semi, baseKey, readMode }) {
   )
 }
 
-// One container per chord line — one selectable unit, original x-positions preserved.
-// Flex layout with min-width = gap to next chord: preserves positions when text fits,
-// shifts subsequent chords right when transposed text is wider (they respond to each other).
-// Stray tokens (bare '#', ',') are filtered. direction:ltr set explicitly.
-function ChordLine({ chordItems, lineY, scale, semi, baseKey, readMode }) {
-  const ts   = readMode ? READ_STYLE.chord : TYPE_STYLE.chord
+// One container per chord line — original x-positions preserved via flex min-width.
+// Renders both actual chords (A-G) and barlines (I, II, x2, |, ||, ...) so that
+// chord-box lines embedded in mixed-column layouts (lyrics on one side, chords on
+// the other) retain their barlines even when isChordBoxLine returns false.
+function ChordLine({ chordItems, lineY, scale, semi, baseKey, readMode, colors }) {
+  const ts          = readMode ? readStyle(colors).chord : TYPE_STYLE.chord
+  const barlineColor = readMode ? '#aaa' : '#777'
+
   const real = [...chordItems]
-    .filter(i => /^[A-G]/.test(i.text))
+    .filter(i => /^[A-G]/.test(i.text) || isBarlineText(i.text))
     .sort((a, b) => a.x0 - b.x0)
   if (!real.length) return null
 
-  const fontPt  = Math.max(...real.map(i => i.font_pt))
+  const chordOnly = real.filter(i => /^[A-G]/.test(i.text))
+  if (!chordOnly.length) return null
+
+  const fontPt  = Math.max(...chordOnly.map(i => i.font_pt))
   const fontSize = fontPt * PT_TO_PX * scale
   const lineH    = fontSize * 1.25
   const originX  = real[0].x0
@@ -183,6 +217,27 @@ function ChordLine({ chordItems, lineY, scale, semi, baseKey, readMode }) {
       {real.map((item, idx) => {
         const nextX    = real[idx + 1]?.x0
         const minWidth = nextX != null ? (nextX - item.x0) * PT_TO_PX * scale : undefined
+
+        if (isBarlineText(item.text)) {
+          const nb       = normalizeBarline(item.text)
+          const isRepeat = /^x\d+$/i.test(item.text)
+          return (
+            <span key={idx} style={{
+              minWidth,
+              display:    'inline-block',
+              fontSize:   isRepeat ? fontSize * 0.82 : fontSize,
+              fontFamily: 'Arial, sans-serif',
+              whiteSpace: 'nowrap',
+              direction:  'ltr',
+              color:      isRepeat ? '#9333ea' : barlineColor,
+              padding:    isRepeat ? '0 3px'   : '0 1px',
+              fontWeight: isRepeat ? 'bold'     : 400,
+            }}>
+              {nb}
+            </span>
+          )
+        }
+
         return (
           <span key={idx} style={{
             minWidth,
@@ -205,8 +260,8 @@ function ChordLine({ chordItems, lineY, scale, semi, baseKey, readMode }) {
   )
 }
 
-function Run({ run, scale, contentW, semi, baseKey, readMode, underline }) {
-  const ts = readMode ? READ_STYLE[run.type] : TYPE_STYLE[run.type]
+function Run({ run, scale, contentW, semi, baseKey, readMode, underline, colors }) {
+  const ts = readMode ? readStyle(colors)[run.type] : TYPE_STYLE[run.type]
   const text = runText(run, semi, baseKey)
 
   const base = {
@@ -251,7 +306,23 @@ function Run({ run, scale, contentW, semi, baseKey, readMode, underline }) {
   )
 }
 
+const TITLE_CHORD_RE  = /^[A-G][b#]?/
+const TITLE_STRUCT_KW = new Set([
+  'intro', 'verse', 'chorus', 'bridge', 'solo', 'interlude', 'outro',
+  'coda', 'tag', 'refrain', 'intrld', 'intrlde', 'brdg', 'hook', 'break', 'chords',
+  'פתיחה', 'בית', 'פזמון', 'גשר', 'מעבר', 'סיום',
+])
+
+function isTitleWord(item) {
+  const t = item.text.trim().replace(/:$/, '')
+  if (!t) return false
+  if (TITLE_CHORD_RE.test(t)) return false
+  if (TITLE_STRUCT_KW.has(t.toLowerCase())) return false
+  return true
+}
+
 // Render the title line as one text block with a "—" between title and artist.
+// Filters out chords and structure keywords (e.g. "Dm", "Intro:") before rendering.
 // Uses song.title words to separate title items from artist items.
 function TitleLine({ items, scale, contentW, songTitle }) {
   const sorted = [...items].sort((a, b) => a.x0 - b.x0)
@@ -262,16 +333,17 @@ function TitleLine({ items, scale, contentW, songTitle }) {
   // RTL text order: larger x0 = visually to the right = earlier in reading order
   const rtlText = (arr) => [...arr].sort((a, b) => b.x0 - a.x0).map(i => i.text).join(' ')
 
-  // Identify which items belong to the title vs artist using song.title words
+  // Keep only real words (no chords, no structure keywords)
+  const wordItems  = sorted.filter(isTitleWord)
   const titleWords = new Set((songTitle || '').trim().split(/\s+/).filter(Boolean))
-  const titleItems  = sorted.filter(i => titleWords.has(i.text.trim()))
-  const artistItems = sorted.filter(i => !titleWords.has(i.text.trim()))
+  const titleItems  = wordItems.filter(i => titleWords.has(i.text.trim()))
+  const artistItems = wordItems.filter(i => !titleWords.has(i.text.trim()))
 
   let text
   if (artistItems.length > 0 && titleItems.length > 0) {
     text = rtlText(titleItems) + ' — ' + rtlText(artistItems)
   } else {
-    text = rtlText(sorted)
+    text = rtlText(wordItems.length ? wordItems : sorted)
   }
 
   return (
@@ -294,7 +366,7 @@ function TitleLine({ items, scale, contentW, songTitle }) {
   )
 }
 
-export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, baseKey = null }) {
+export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, baseKey = null, colors }) {
   const containerRef = useRef(null)
   const [baseScale, setBaseScale] = useState(1)
 
@@ -323,64 +395,75 @@ export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, 
         const pageH = (page.height_pt ?? 780) * PT_TO_PX * scale + 20
         const lines = groupLines(page.items)
 
+        // Flatten Y-lines into X-clusters: each cluster is an independent visual unit.
+        // This separates left/right column items that share a Y coordinate.
+        const clusters = []
+        for (const line of lines) {
+          for (const clusterItems of splitXClusters(line.items)) {
+            clusters.push({ y: line.y, items: clusterItems })
+          }
+        }
+
         const elements = []
-        let li = 0
-        while (li < lines.length) {
-          const line = lines[li]
-          const isTitleByData = line.items.some(i => i.is_underline)
-          const effectiveTitleLine = pi === 0 && (isTitleByData || li === 0)
+        let ci = 0
+        while (ci < clusters.length) {
+          const cluster = clusters[ci]
+          const isTitleByData = cluster.items.some(i => i.is_underline)
+          const effectiveTitleLine = pi === 0 && (isTitleByData || ci === 0)
 
           if (effectiveTitleLine) {
             elements.push(
               <TitleLine
                 key={`${pi}-title`}
-                items={line.items}
+                items={cluster.items}
                 scale={scale}
                 contentW={contentW}
                 songTitle={song.title}
               />
             )
-            li++
-          } else if (isChordBoxLine(line.items)) {
-            // Collect all consecutive chord-box lines into one section
-            const group = [line]
-            let gi = li + 1
-            while (gi < lines.length && isChordBoxLine(lines[gi].items)) {
-              group.push(lines[gi])
+            ci++
+          } else if (isChordBoxLine(cluster.items)) {
+            // Collect consecutive chord-box clusters into one section
+            const group = [cluster]
+            let gi = ci + 1
+            while (gi < clusters.length && isChordBoxLine(clusters[gi].items)) {
+              group.push(clusters[gi])
               gi++
             }
             elements.push(
               <ChordBoxSection
-                key={`${pi}-${li}-section`}
+                key={`${pi}-${ci}-section`}
                 lines={group}
                 scale={scale}
                 semi={semi}
                 baseKey={baseKey}
                 readMode={readMode}
+                colors={colors}
               />
             )
-            li = gi
+            ci = gi
           } else {
-            const chordItems = line.items.filter(i => i.type === 'chord')
-            const otherItems = line.items.filter(i => i.type !== 'chord')
+            const chordItems = cluster.items.filter(i => i.type === 'chord')
+            const otherItems = cluster.items.filter(i => i.type !== 'chord')
 
             if (chordItems.length > 0) {
               elements.push(
                 <ChordLine
-                  key={`${pi}-${li}-chords`}
+                  key={`${pi}-${ci}-chords`}
                   chordItems={chordItems}
-                  lineY={line.y}
+                  lineY={cluster.y}
                   scale={scale}
                   semi={semi}
                   baseKey={baseKey}
                   readMode={readMode}
+                  colors={colors}
                 />
               )
             }
-            groupRuns(otherItems, line.y).forEach((run, ri) => {
+            groupRuns(otherItems, cluster.y).forEach((run, ri) => {
               elements.push(
                 <Run
-                  key={`${pi}-${li}-${ri}`}
+                  key={`${pi}-${ci}-${ri}`}
                   run={run}
                   scale={scale}
                   contentW={contentW}
@@ -388,10 +471,11 @@ export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, 
                   baseKey={baseKey}
                   readMode={readMode}
                   underline={false}
+                  colors={colors}
                 />
               )
             })
-            li++
+            ci++
           }
         }
 
@@ -412,6 +496,19 @@ export default function SongViewer({ song, semi = 0, readMode = true, zoom = 1, 
               boxShadow: '0 4px 20px rgba(0,0,0,.4)',
               overflow: 'visible',
             }}>
+              {page.rects?.map((rect, ri) => (
+                <div key={`rect-${ri}`} style={{
+                  position:     'absolute',
+                  left:         rect.x0 * PT_TO_PX * scale,
+                  top:          rect.y  * PT_TO_PX * scale,
+                  width:        (rect.x1 - rect.x0) * PT_TO_PX * scale,
+                  height:       (rect.y2 - rect.y)  * PT_TO_PX * scale,
+                  border:       '1.5px solid #aaa',
+                  borderRadius: 2,
+                  pointerEvents: 'none',
+                  boxSizing:    'border-box',
+                }} />
+              ))}
               {elements}
             </div>
           </div>
