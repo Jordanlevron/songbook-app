@@ -1,11 +1,9 @@
 # Songbook App — Claude Instructions
 
 ## Session Start
-At the beginning of every session, run:
-```
-git -C ~/songbook-app pull origin main
-```
-This ensures the working copy reflects any changes committed from a previous session.
+At the beginning of every session:
+1. Run `git -C ~/songbook-app pull origin main` to get latest changes
+2. Read all files in `.claude/memory/` — they contain project context, user preferences, and design rules that must be followed throughout the session
 
 ## Setup (first time on a new machine)
 
