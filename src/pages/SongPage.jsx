@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { getSong } from '../lib/songs'
 import SongViewer from '../components/SongViewer'
-import TransposeBar from '../components/TransposeBar'
+import TransposeBar, { DEFAULT_COLORS } from '../components/TransposeBar'
 import { detectKey } from '../lib/transpose'
 
 export default function SongPage() {
@@ -12,9 +12,17 @@ export default function SongPage() {
   const [loading, setLoading] = useState(true)
   const [semi, setSemi] = useState(0)
   const [readMode, setReadMode] = useState(true)
-  const [zoom, setZoom] = useState(1)
+  const [zoom, setZoom] = useState(() => {
+    const saved = parseFloat(localStorage.getItem('songbook_zoom'))
+    return saved > 0 ? saved : 1
+  })
+  const [colors, setColors] = useState(DEFAULT_COLORS)
 
-  const handleZoom = (v) => setZoom(Math.max(0.3, Math.min(3, Math.round(v * 10) / 10)))
+  const handleZoom = (v) => {
+    const clamped = Math.max(0.3, Math.min(3, Math.round(v * 10) / 10))
+    setZoom(clamped)
+    localStorage.setItem('songbook_zoom', clamped)
+  }
 
   useEffect(() => {
     setLoading(true)
@@ -63,10 +71,12 @@ export default function SongPage() {
         onReadMode={setReadMode}
         zoom={zoom}
         onZoom={handleZoom}
+        colors={colors}
+        onColors={setColors}
       />
 
       <div style={{ flex: 1, overflow: 'auto', padding: '16px 8px' }}>
-        <SongViewer song={song} semi={semi} readMode={readMode} zoom={zoom} baseKey={baseKey} />
+        <SongViewer song={song} semi={semi} readMode={readMode} zoom={zoom} baseKey={baseKey} colors={colors} />
       </div>
     </div>
   )
